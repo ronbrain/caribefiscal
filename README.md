@@ -24,6 +24,7 @@ lenguaje.
 - 🔧 **Especificación OpenAPI 3.0:** [`openapi.yaml`](./openapi.yaml) (impórtala en Swagger/Stoplight)
 - 📮 **Colección Postman:** [`postman_collection.json`](./postman_collection.json)
 - 🧩 **SDKs:** PHP · Node/TypeScript · Python · Java · C#/.NET · Rust · cURL
+- 📝 **Cambios:** [`CHANGELOG.md`](./CHANGELOG.md)
 
 ---
 
