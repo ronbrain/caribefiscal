@@ -1,0 +1,989 @@
+openapi: 3.0.3
+info:
+  title: CaribeFiscal · API e-CF DGII
+  version: "1.0.0"
+  description: |
+    API REST para la emisión de Comprobantes Fiscales Electrónicos (e-CF) ante la
+    DGII de República Dominicana. Permite emitir e-CF, consultar su estado, gestionar
+    secuencias NCF, validar RNC, generar los formatos fiscales (606/607/608, IT-1,
+    IR-2, IR-1, TSS) y recibir los acuses de la DGII (ARECF/ACECF/ANECF).
+
+    ## Autenticación
+    Todas las rutas bajo `/api/v1/*` requieren el header **`X-API-Key`** con tu clave
+    (formato `ck_live_…` en producción o `ck_test_…` en pruebas). De forma alternativa
+    puedes usar `X-Session-Token` con un token de sesión obtenido en `/auth/login`.
+
+    La API key se entrega **una sola vez** al crear la cuenta (panel o `/admin/companies`)
+    y se almacena hasheada — guárdala de forma segura.
+  contact:
+    name: Soporte CaribeFiscal
+    email: ecf@omegaerp.do
+servers:
+  - url: https://ecf.omegaerp.do
+    description: Producción (reemplaza por tu dominio)
+  - url: http://localhost:8081
+    description: Local / desarrollo
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Auth
+    description: Registro, verificación y login self-service
+  - name: e-CF
+    description: Emisión y consulta de comprobantes electrónicos
+  - name: NCF
+    description: Gestión de secuencias de numeración (eNCF)
+  - name: RNC
+    description: Validación y autocompletado del padrón de contribuyentes
+  - name: Reportes
+    description: Formatos fiscales y declaraciones juradas
+  - name: Empresa
+    description: Configuración de la empresa y certificado digital
+  - name: Aprobaciones
+    description: Aprobación comercial de comprobantes recibidos (ACECF)
+  - name: Correcciones
+    description: Notas de crédito/débito (33/34)
+  - name: Webhooks
+    description: Recepción de acuses de la DGII
+  - name: Receptor
+    description: Servicios del rol receptor exigidos por la DGII (recepción, aprobación comercial, autenticación). Cada ruta /fe/* admite además un prefijo de tenant con el RNC, p. ej. POST /{rnc}/fe/recepcion/api/ecf, que es el buzón dedicado de cada empresa. La forma sin tenant (/fe/*) enruta por el RNC dentro del documento.
+
+paths:
+  # ───────────────────────────── AUTH ─────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Registro self-service de empresa
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201': { description: Cuenta creada, OTP enviado por correo }
+        '409': { description: Email o RNC ya registrado }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /auth/verify-otp:
+    post:
+      tags: [Auth]
+      summary: Verificar email con código OTP
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string, format: email }
+                code:  { type: string, example: "123456" }
+      responses:
+        '200':
+          description: Email verificado, devuelve token de sesión
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:     { type: boolean }
+                  sessionToken:{ type: string }
+                  expiresAt:   { type: string, format: date-time }
+                  company:     { $ref: '#/components/schemas/Company' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login con email y contraseña
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: Sesión iniciada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:      { type: boolean }
+                  sessionToken: { type: string }
+                  expiresAt:    { type: string, format: date-time }
+                  company:      { $ref: '#/components/schemas/Company' }
+        '401': { description: Credenciales inválidas }
+        '403': { description: Email no verificado o cuenta deshabilitada }
+
+  /api/v1/health:
+    get:
+      tags: [Auth]
+      summary: Health check autenticado (incluye alertas NCF y reintentos)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:        { type: string, example: ok }
+                  db:            { type: string, example: up }
+                  ncfAlerts:     { type: integer }
+                  pendingRetries:{ type: integer }
+
+  # ───────────────────────────── e-CF ─────────────────────────────
+  /api/v1/ecf/submit:
+    post:
+      tags: [e-CF]
+      summary: Emitir un comprobante fiscal electrónico
+      description: |
+        Reserva el siguiente eNCF, construye el XML, lo firma digitalmente, calcula el
+        código de seguridad y lo transmite a la DGII. Si la DGII no está disponible,
+        el comprobante queda en estado `PENDING` y el worker de reintentos lo reenvía
+        automáticamente (degradación elegante, nunca falla con 500).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitEcf' }
+      responses:
+        '201':
+          description: Comprobante aceptado/encolado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubmitResult' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { description: Límite de 50 emisiones por minuto excedido }
+
+  /api/v1/ecf/status/{trackId}:
+    get:
+      tags: [e-CF]
+      summary: Consultar el estado de un comprobante en la DGII
+      parameters:
+        - { name: trackId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Estado del comprobante }
+
+  /api/v1/ecf/{encf}:
+    get:
+      tags: [e-CF]
+      summary: Obtener el detalle de un comprobante por eNCF
+      parameters:
+        - { name: encf, in: path, required: true, schema: { type: string }, example: "E310000000001" }
+      responses:
+        '200':
+          description: Detalle del comprobante
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  invoice: { $ref: '#/components/schemas/Invoice' }
+        '404': { description: No encontrado }
+
+  /api/v1/ecf/{encf}/pdf:
+    get:
+      tags: [e-CF]
+      summary: Descargar la representación impresa (PDF) del comprobante
+      parameters:
+        - { name: encf, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: PDF
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        '404': { description: No encontrado }
+
+  /api/v1/ecf/cancel:
+    post:
+      tags: [e-CF]
+      summary: Anular un comprobante (envía ANECF)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [encf, motivo]
+              properties:
+                encf:   { type: string }
+                motivo: { type: string }
+      responses:
+        '200': { description: Anulación procesada }
+        '404': { description: Comprobante no encontrado }
+
+  /api/v1/ecf/queue:
+    get:
+      tags: [e-CF]
+      summary: Estado de la cola de envío y del circuit breaker
+      responses:
+        '200':
+          description: Cola
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  queue:
+                    type: object
+                    properties:
+                      pending:   { type: integer }
+                      error:     { type: integer }
+                      submitted: { type: integer }
+                      accepted:  { type: integer }
+                      rejected:  { type: integer }
+                  circuitBreaker: { type: object }
+
+  /api/v1/ecf/:
+    get:
+      tags: [e-CF]
+      summary: Listar comprobantes con filtros y paginación
+      parameters:
+        - { name: status,    in: query, schema: { type: string } }
+        - { name: ecfType,   in: query, schema: { type: string } }
+        - { name: startDate, in: query, schema: { type: string, format: date } }
+        - { name: endDate,   in: query, schema: { type: string, format: date } }
+        - { name: search,    in: query, schema: { type: string } }
+        - { name: page,      in: query, schema: { type: integer, default: 1 } }
+        - { name: size,      in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: Listado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:  { type: boolean }
+                  invoices: { type: array, items: { $ref: '#/components/schemas/Invoice' } }
+                  total:    { type: integer }
+                  kpis:     { type: object }
+
+  /api/v1/ecf/b2c/summary/generate:
+    post:
+      tags: [e-CF]
+      summary: Calcular el resumen diario de consumo (RFCE)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties: { date: { type: string, format: date } }
+      responses:
+        '200': { description: Resumen calculado }
+
+  /api/v1/ecf/b2c/summary/submit:
+    post:
+      tags: [e-CF]
+      summary: Firmar y transmitir el resumen diario a la DGII
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date]
+              properties: { date: { type: string, format: date } }
+      responses:
+        '200': { description: Resumen enviado }
+
+  # ───────────────────────────── NCF ─────────────────────────────
+  /api/v1/ncf/sequences:
+    get:
+      tags: [NCF]
+      summary: Listar todas las secuencias configuradas
+      responses:
+        '200':
+          description: Secuencias
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:   { type: boolean }
+                  sequences: { type: array, items: { $ref: '#/components/schemas/Sequence' } }
+                  alerts:    { type: array, items: { type: object } }
+
+  /api/v1/ncf/next/{type}:
+    get:
+      tags: [NCF]
+      summary: Previsualizar el siguiente eNCF (sin reservarlo)
+      parameters:
+        - { name: type, in: path, required: true, schema: { type: string }, example: "31" }
+      responses:
+        '200': { description: Siguiente eNCF }
+        '404': { description: Tipo no configurado }
+
+  /api/v1/ncf/configure:
+    post:
+      tags: [NCF]
+      summary: Registrar o actualizar una secuencia NCF
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ecfType, prefix, maxSequence, expiryDate]
+              properties:
+                ecfType:     { type: string, enum: ['31','32','33','34','41','43','44','45','46','47'] }
+                prefix:      { type: string, minLength: 3, maxLength: 5, example: "E31" }
+                maxSequence: { type: integer, example: 10000000 }
+                expiryDate:  { type: string, format: date, example: "2026-12-31" }
+                startFrom:   { type: integer, default: 0 }
+      responses:
+        '201': { description: Secuencia configurada }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/ncf/{type}:
+    delete:
+      tags: [NCF]
+      summary: Desactivar una secuencia
+      parameters:
+        - { name: type, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Desactivada }
+        '404': { description: No encontrada }
+
+  # ───────────────────────────── RNC ─────────────────────────────
+  /api/v1/rnc/{rnc}:
+    get:
+      tags: [RNC]
+      summary: Consultar un RNC (local con respaldo en DGII)
+      parameters:
+        - { name: rnc, in: path, required: true, schema: { type: string }, example: "130556677" }
+      responses:
+        '200':
+          description: Contribuyente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  source:  { type: string, enum: [local, dgii] }
+                  rnc:     { type: string }
+                  nombre:  { type: string }
+                  estado:  { type: string }
+        '404': { description: No encontrado }
+
+  /api/v1/rnc/autocomplete:
+    get:
+      tags: [RNC]
+      summary: Autocompletado de RNC/razón social
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Resultados }
+
+  /api/v1/rnc/bulk:
+    post:
+      tags: [RNC]
+      summary: Validar varios RNC a la vez
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rncs]
+              properties:
+                rncs: { type: array, items: { type: string } }
+      responses:
+        '200': { description: Resultados }
+
+  # ───────────────────────────── REPORTES ─────────────────────────────
+  /api/v1/reports/607:
+    post:
+      tags: [Reportes]
+      summary: Formato 607 — Ventas (TXT oficial DGII)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Period' }
+      responses:
+        '200': { $ref: '#/components/responses/ReportTxt' }
+
+  /api/v1/reports/606:
+    post:
+      tags: [Reportes]
+      summary: Formato 606 — Compras (TXT oficial DGII)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Period' }
+      responses:
+        '200': { $ref: '#/components/responses/ReportTxt' }
+
+  /api/v1/reports/608:
+    post:
+      tags: [Reportes]
+      summary: Formato 608 — Comprobantes anulados (TXT oficial DGII)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Period' }
+      responses:
+        '200': { $ref: '#/components/responses/ReportTxt' }
+
+  /api/v1/reports/it1:
+    post:
+      tags: [Reportes]
+      summary: IT-1 — Declaración mensual del ITBIS (con casillas)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Period' }
+      responses:
+        '200':
+          description: Declaración IT-1
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:    { type: boolean }
+                  formulario: { type: string, example: "IT-1" }
+                  casillas:   { type: object, additionalProperties: { type: number } }
+                  resumen:    { type: object }
+                  txt:        { type: string }
+
+  /api/v1/reports/ir2:
+    post:
+      tags: [Reportes]
+      summary: IR-2 — ISR Sociedades (27% sobre renta neta imponible)
+      description: |
+        El e-CF no contiene la contabilidad completa, por lo que el cliente aporta las
+        cifras del ejercicio y el servicio aplica las reglas fiscales oficiales:
+        `Renta neta imponible = (ingresos − costos/gastos) + gastos no deducibles`,
+        `ISR = 27%`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Ir2Request' }
+      responses:
+        '200': { $ref: '#/components/responses/DeclarationResult' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/reports/ir1:
+    post:
+      tags: [Reportes]
+      summary: IR-1 — ISR Personas Físicas (escala progresiva)
+      description: |
+        Escala anual vigente: 0–416,220 exento; 416,220–624,329 15%; 624,329–867,123
+        31,216 + 20%; >867,123 79,776 + 25% del excedente.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Ir1Request' }
+      responses:
+        '200': { $ref: '#/components/responses/DeclarationResult' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/reports/tss:
+    post:
+      tags: [Reportes]
+      summary: TSS — Aportes de seguridad social (recibe la nómina)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [periodo, empleados]
+              properties:
+                periodo: { type: string, pattern: '^\d{4}-\d{2}$', example: "2026-06" }
+                empleados:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [cedula, nombre, salarioBruto]
+                    properties:
+                      cedula:       { type: string }
+                      nombre:       { type: string }
+                      salarioBruto: { type: number }
+      responses:
+        '200': { description: Aportes calculados }
+
+  /api/v1/reports/isr:
+    post:
+      tags: [Reportes]
+      summary: Retención ISR sobre servicios (10%)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Period' }
+      responses:
+        '200': { description: Retención calculada }
+
+  # ───────────────────────────── EMPRESA ─────────────────────────────
+  /api/v1/company/config:
+    get:
+      tags: [Empresa]
+      summary: Obtener la configuración de la empresa
+      responses:
+        '200': { description: Configuración }
+    put:
+      tags: [Empresa]
+      summary: Actualizar metadatos de la empresa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dgiiEnv:        { type: string, enum: [testecf, certecf, ecf] }
+                address:        { type: string }
+                phone:          { type: string }
+                email:          { type: string, format: email }
+                commercialName: { type: string }
+      responses:
+        '200': { description: Actualizada }
+
+  /api/v1/company/certificate:
+    get:
+      tags: [Empresa]
+      summary: Estado del certificado digital
+      responses:
+        '200': { description: Estado (certificate puede ser null) }
+    post:
+      tags: [Empresa]
+      summary: Subir certificado digital .p12
+      parameters:
+        - { name: password, in: query, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201': { description: Certificado cargado }
+        '422': { description: Certificado inválido o contraseña incorrecta }
+
+  # ───────────────────────────── APROBACIONES ─────────────────────────────
+  /api/v1/approvals:
+    get:
+      tags: [Aprobaciones]
+      summary: Listar aprobaciones enviadas
+      responses:
+        '200': { description: Listado }
+    post:
+      tags: [Aprobaciones]
+      summary: Aprobar o rechazar un comprobante recibido (ACECF)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [encf, rncEmisor, fechaEmision, montoTotal, estado]
+              properties:
+                encf:         { type: string }
+                rncEmisor:    { type: string }
+                fechaEmision: { type: string, format: date }
+                montoTotal:   { type: number }
+                estado:       { type: string, enum: [ACCEPTED, REJECTED] }
+                motivo:       { type: string, description: "Requerido si estado=REJECTED" }
+      responses:
+        '201': { description: Aprobación registrada }
+
+  # ───────────────────────────── CORRECCIONES ─────────────────────────────
+  /api/v1/corrections:
+    get:
+      tags: [Correcciones]
+      summary: Listar notas de crédito/débito
+      responses:
+        '200': { description: Listado }
+    post:
+      tags: [Correcciones]
+      summary: Crear borrador de nota de crédito/débito
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correctionType, codigoModificacion, ncfModificado, fechaNcfModificado, items]
+              properties:
+                correctionType:     { type: string, enum: ['33','34'] }
+                codigoModificacion: { type: string, enum: ['1','2','3','4','5'] }
+                ncfModificado:      { type: string }
+                fechaNcfModificado: { type: string, format: date }
+                razon:              { type: string, maxLength: 90 }
+                customerRnc:        { type: string }
+                customerName:       { type: string }
+                items:
+                  type: array
+                  minItems: 1
+                  items: { $ref: '#/components/schemas/Item' }
+      responses:
+        '201': { description: Borrador creado }
+
+  /api/v1/corrections/{id}/emit:
+    post:
+      tags: [Correcciones]
+      summary: Construir, firmar y transmitir la nota a la DGII
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Nota emitida }
+
+  # ───────────────────────────── WEBHOOKS ─────────────────────────────
+  /webhooks/dgii:
+    post:
+      tags: [Webhooks]
+      summary: Recepción de acuses de la DGII (ARECF/ACECF/ANECF)
+      description: Endpoint público que recibe el XML que envía la DGII. No requiere auth.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema: { type: string }
+      responses:
+        '200': { description: Recibido }
+
+  /webhooks/dgii/events:
+    get:
+      tags: [Webhooks]
+      summary: Historial de acuses recibidos
+      responses:
+        '200': { description: Eventos }
+
+  # ───────────────────────────── RECEPTOR (DGII) ─────────────────────────────
+  /fe/autenticacion/api/semilla:
+    get:
+      tags: [Receptor]
+      summary: Semilla de autenticación (rol receptor)
+      description: Devuelve un XML SemillaModel que el emisor debe firmar para obtener un token.
+      security: []
+      responses:
+        '200':
+          description: Semilla XML
+          content:
+            application/xml:
+              schema: { type: string }
+
+  /fe/autenticacion/api/validacioncertificado:
+    post:
+      tags: [Receptor]
+      summary: Valida la semilla firmada y emite un token Bearer
+      security: []
+      requestBody:
+        required: true
+        description: Semilla firmada (multipart campo "xml" o XML crudo)
+        content:
+          application/xml: { schema: { type: string } }
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { xml: { type: string, format: binary } }
+      responses:
+        '200':
+          description: Token emitido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:    { type: string }
+                  expedido: { type: string, format: date-time }
+                  expira:   { type: string, format: date-time }
+        '401': { description: Firma inválida o semilla vencida }
+
+  /fe/recepcion/api/ecf:
+    post:
+      tags: [Receptor]
+      summary: Recibe un e-CF y responde con el ARECF firmado
+      description: "Requiere header Authorization Bearer <token>. El receptor se identifica por el RNC Comprador del e-CF."
+      security: []
+      parameters:
+        - { name: Authorization, in: header, required: true, schema: { type: string }, example: "Bearer <token>" }
+      requestBody:
+        required: true
+        content:
+          application/xml: { schema: { type: string } }
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { xml: { type: string, format: binary } }
+      responses:
+        '200':
+          description: Acuse de Recibo (ARECF) firmado
+          content:
+            application/xml:
+              schema: { type: string }
+        '401': { description: Token inválido o expirado }
+
+  /fe/aprobacioncomercial/api/ecf:
+    post:
+      tags: [Receptor]
+      summary: Recibe una Aprobación Comercial (ACECF)
+      description: "Requiere header Authorization Bearer <token>. Actualiza el estado del comprobante propio."
+      security: []
+      parameters:
+        - { name: Authorization, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/xml: { schema: { type: string } }
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { xml: { type: string, format: binary } }
+      responses:
+        '200':
+          description: Procesada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estado:  { type: string, example: OK }
+                  mensaje: { type: string }
+        '401': { description: Token inválido o expirado }
+
+  /api/v1/inbound:
+    get:
+      tags: [Receptor]
+      summary: Documentos recibidos por la empresa (rol receptor)
+      parameters:
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: size, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        '200':
+          description: Listado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:   { type: boolean }
+                  documents: { type: array, items: { type: object } }
+                  total:     { type: integer }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  responses:
+    ValidationError:
+      description: Error de validación
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean, example: false }
+              error:   { type: string }
+              errors:  { type: object, additionalProperties: { type: array, items: { type: string } } }
+    ReportTxt:
+      description: Reporte generado (TXT oficial DGII en el campo `txt`)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:  { type: boolean }
+              period:   { type: string }
+              count:    { type: integer }
+              total:    { type: number }
+              filename: { type: string }
+              txt:      { type: string }
+    DeclarationResult:
+      description: Declaración jurada calculada
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:    { type: boolean }
+              formulario: { type: string }
+              periodo:    { type: string }
+              resumen:    { type: object }
+              casillas:   { type: object, additionalProperties: { type: number } }
+              txt:        { type: string }
+              xml:        { type: string }
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [rnc, companyName, email, password]
+      properties:
+        rnc:         { type: string, example: "130556677" }
+        companyName: { type: string }
+        email:       { type: string, format: email }
+        password:    { type: string, minLength: 8 }
+        dgiiEnv:     { type: string, enum: [testecf, certecf, ecf], default: testecf }
+
+    Company:
+      type: object
+      properties:
+        companyId: { type: string, format: uuid }
+        rnc:       { type: string }
+        name:      { type: string }
+        email:     { type: string }
+        dgiiEnv:   { type: string }
+
+    Item:
+      type: object
+      required: [numeroLinea, indicadorBienServicio, nombre, cantidad, precioUnitario]
+      properties:
+        numeroLinea:           { type: integer, minimum: 1 }
+        indicadorBienServicio: { type: string, enum: ['1','2'], description: "1=bien, 2=servicio" }
+        nombre:                { type: string, maxLength: 200 }
+        cantidad:              { type: number }
+        precioUnitario:        { type: number }
+        descuento:             { type: number }
+        recargo:               { type: number }
+        tasaITBIS:             { type: number, enum: [0, 16, 18] }
+
+    SubmitEcf:
+      type: object
+      required: [ecfType, emisor, items, tipoIngresos, tipoPago, formaPago, invoiceDate]
+      properties:
+        ecfType:      { type: string, enum: ['31','32','33','34','41','43','44','45','46','47'] }
+        emisor:
+          type: object
+          required: [rnc, razonSocial, direccion, fechaEmision]
+          properties:
+            rnc:             { type: string }
+            razonSocial:     { type: string }
+            nombreComercial: { type: string }
+            direccion:       { type: string }
+            telefono:        { type: string }
+            email:           { type: string, format: email }
+            fechaEmision:    { type: string, format: date }
+        comprador:
+          type: object
+          required: [razonSocial]
+          properties:
+            rnc:         { type: string }
+            cedula:      { type: string }
+            razonSocial: { type: string }
+            direccion:   { type: string }
+            email:       { type: string, format: email }
+        items:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Item' }
+        tipoIngresos: { type: string, enum: ['01','02','03','04','05','06'] }
+        tipoPago:     { type: string, enum: ['1','2','3'] }
+        formaPago:    { type: string, enum: ['01','02','03','04','05','06','07','08','09'] }
+        plazoCredito: { type: string }
+        invoiceDate:  { type: string, format: date }
+        fechaVencimientoSecuencia: { type: string, format: date }
+        informacionReferencia:
+          type: object
+          description: Requerido para notas (33/34)
+          properties:
+            ncfModificado:        { type: string }
+            rncOtroContribuyente: { type: string }
+            fechaNCFModificado:   { type: string, format: date }
+            codigoModificacion:   { type: string, enum: ['1','2','3','4','5'] }
+            razonModificacion:    { type: string, maxLength: 90 }
+            indicadorNotaCredito: { type: string, enum: ['0','1'] }
+
+    SubmitResult:
+      type: object
+      properties:
+        success:      { type: boolean }
+        eNCF:         { type: string, example: "E310000000001" }
+        trackId:      { type: string }
+        status:       { type: string, enum: [PENDING, SUBMITTED, ACCEPTED, REJECTED] }
+        invoiceId:    { type: string, format: uuid }
+        securityCode: { type: string, example: "A1B2C3" }
+
+    Invoice:
+      type: object
+      properties:
+        id:            { type: string, format: uuid }
+        encf:          { type: string }
+        ecf_type:      { type: string }
+        status:        { type: string }
+        total_amount:  { type: number }
+        itbis_amount:  { type: number }
+        customer_rnc:  { type: string }
+        customer_name: { type: string }
+        invoice_date:  { type: string, format: date }
+        security_code: { type: string }
+
+    Sequence:
+      type: object
+      properties:
+        ecfType:         { type: string }
+        prefix:          { type: string }
+        currentSequence: { type: integer }
+        maxSequence:     { type: integer }
+        remaining:       { type: integer }
+        percentUsed:     { type: number }
+        expiryDate:      { type: string, format: date }
+        daysUntilExpiry: { type: integer }
+        isActive:        { type: boolean }
+
+    Period:
+      type: object
+      required: [startDate, endDate]
+      properties:
+        startDate: { type: string, format: date, example: "2026-06-01" }
+        endDate:   { type: string, format: date, example: "2026-06-30" }
+
+    Ir2Request:
+      type: object
+      required: [periodo, ingresosBrutos]
+      properties:
+        periodo:             { type: string, pattern: '^\d{4}$', example: "2025" }
+        ingresosBrutos:      { type: number }
+        otrosIngresos:       { type: number, default: 0 }
+        costoVentas:         { type: number, default: 0 }
+        gastosOperacionales: { type: number, default: 0 }
+        gastosFinancieros:   { type: number, default: 0 }
+        depreciacion:        { type: number, default: 0 }
+        otrasDeducciones:    { type: number, default: 0 }
+        gastosNoDeducibles:  { type: number, default: 0 }
+        anticipos:           { type: number, default: 0 }
+        retenciones:         { type: number, default: 0 }
+        saldoAFavorAnterior: { type: number, default: 0 }
+        creditoExterior:     { type: number, default: 0 }
+
+    Ir1Request:
+      type: object
+      required: [periodo, ingresos]
+      properties:
+        periodo:             { type: string, pattern: '^\d{4}$', example: "2025" }
+        ingresos:            { type: number }
+        gastos:              { type: number, default: 0 }
+        exenciones:          { type: number, default: 0 }
+        retenciones:         { type: number, default: 0 }
+        anticipos:           { type: number, default: 0 }
+        saldoAFavorAnterior: { type: number, default: 0 }

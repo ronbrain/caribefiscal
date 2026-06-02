@@ -1,0 +1,121 @@
+{
+  "info": {
+    "name": "CaribeFiscal · API e-CF DGII",
+    "description": "Colección para integrar con el microservicio e-CF de la DGII (RD). Configura las variables baseUrl y apiKey en el entorno.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://ecf.omegaerp.do" },
+    { "key": "apiKey", "value": "ck_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" },
+    { "key": "encf", "value": "E310000000001" },
+    { "key": "trackId", "value": "" }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-API-Key" },
+      { "key": "value", "value": "{{apiKey}}" },
+      { "key": "in", "value": "header" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"tu@empresa.do\",\n  \"password\": \"tu-clave\"\n}" }
+          }
+        },
+        {
+          "name": "Health (autenticado)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/health" }
+        }
+      ]
+    },
+    {
+      "name": "e-CF",
+      "item": [
+        {
+          "name": "Emitir factura (31)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/ecf/submit",
+            "body": { "mode": "raw", "raw": "{\n  \"ecfType\": \"31\",\n  \"emisor\": { \"rnc\": \"130556677\", \"razonSocial\": \"BARSHINE SRL\", \"direccion\": \"Av. Churchill 100\", \"fechaEmision\": \"2026-06-01\" },\n  \"comprador\": { \"rnc\": \"101023127\", \"razonSocial\": \"CLIENTE SRL\" },\n  \"items\": [ { \"numeroLinea\": 1, \"indicadorBienServicio\": \"2\", \"nombre\": \"Consultoría\", \"cantidad\": 1, \"precioUnitario\": 10000, \"tasaITBIS\": 18 } ],\n  \"tipoIngresos\": \"01\", \"tipoPago\": \"1\", \"formaPago\": \"01\", \"invoiceDate\": \"2026-06-01\"\n}" }
+          }
+        },
+        {
+          "name": "Emitir nota de crédito (34)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/ecf/submit",
+            "body": { "mode": "raw", "raw": "{\n  \"ecfType\": \"34\",\n  \"emisor\": { \"rnc\": \"130556677\", \"razonSocial\": \"BARSHINE SRL\", \"direccion\": \"Av. Churchill 100\", \"fechaEmision\": \"2026-06-02\" },\n  \"items\": [ { \"numeroLinea\": 1, \"indicadorBienServicio\": \"2\", \"nombre\": \"Ajuste\", \"cantidad\": 1, \"precioUnitario\": 1000, \"tasaITBIS\": 18 } ],\n  \"tipoIngresos\": \"01\", \"tipoPago\": \"1\", \"formaPago\": \"01\", \"invoiceDate\": \"2026-06-02\",\n  \"informacionReferencia\": { \"ncfModificado\": \"{{encf}}\", \"fechaNCFModificado\": \"2026-06-01\", \"codigoModificacion\": \"1\" }\n}" }
+          }
+        },
+        { "name": "Estado por trackId", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ecf/status/{{trackId}}" } },
+        { "name": "Detalle por eNCF", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ecf/{{encf}}" } },
+        { "name": "Descargar PDF", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ecf/{{encf}}/pdf" } },
+        {
+          "name": "Anular",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/ecf/cancel",
+            "body": { "mode": "raw", "raw": "{ \"encf\": \"{{encf}}\", \"motivo\": \"Error en monto\" }" }
+          }
+        },
+        { "name": "Listar", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ecf/?page=1&size=20" } },
+        { "name": "Cola + circuit breaker", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ecf/queue" } }
+      ]
+    },
+    {
+      "name": "NCF",
+      "item": [
+        { "name": "Listar secuencias", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ncf/sequences" } },
+        { "name": "Siguiente eNCF (31)", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/ncf/next/31" } },
+        {
+          "name": "Configurar secuencia",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/ncf/configure",
+            "body": { "mode": "raw", "raw": "{ \"ecfType\": \"31\", \"prefix\": \"E31\", \"maxSequence\": 10000000, \"expiryDate\": \"2026-12-31\" }" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "RNC",
+      "item": [
+        { "name": "Consultar RNC", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/rnc/130556677" } },
+        { "name": "Autocompletar", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/rnc/autocomplete?q=barshine" } }
+      ]
+    },
+    {
+      "name": "Reportes",
+      "item": [
+        { "name": "607 Ventas", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/607", "body": { "mode": "raw", "raw": "{ \"startDate\": \"2026-06-01\", \"endDate\": \"2026-06-30\" }" } } },
+        { "name": "606 Compras", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/606", "body": { "mode": "raw", "raw": "{ \"startDate\": \"2026-06-01\", \"endDate\": \"2026-06-30\" }" } } },
+        { "name": "608 Anulados", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/608", "body": { "mode": "raw", "raw": "{ \"startDate\": \"2026-06-01\", \"endDate\": \"2026-06-30\" }" } } },
+        { "name": "IT-1 ITBIS", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/it1", "body": { "mode": "raw", "raw": "{ \"startDate\": \"2026-06-01\", \"endDate\": \"2026-06-30\" }" } } },
+        { "name": "IR-2 ISR Sociedades", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/ir2", "body": { "mode": "raw", "raw": "{ \"periodo\": \"2025\", \"ingresosBrutos\": 5000000, \"costoVentas\": 2000000, \"gastosOperacionales\": 1000000, \"gastosNoDeducibles\": 200000, \"anticipos\": 100000, \"retenciones\": 50000 }" } } },
+        { "name": "IR-1 ISR Personas Físicas", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/ir1", "body": { "mode": "raw", "raw": "{ \"periodo\": \"2025\", \"ingresos\": 700000, \"retenciones\": 20000 }" } } },
+        { "name": "TSS Nómina", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "url": "{{baseUrl}}/api/v1/reports/tss", "body": { "mode": "raw", "raw": "{ \"periodo\": \"2026-06\", \"empleados\": [ { \"cedula\": \"00100000001\", \"nombre\": \"Juan Pérez\", \"salarioBruto\": 50000 } ] }" } } }
+      ]
+    },
+    {
+      "name": "Empresa",
+      "item": [
+        { "name": "Ver configuración", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/company/config" } },
+        { "name": "Estado certificado", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/company/certificate" } }
+      ]
+    }
+  ]
+}
