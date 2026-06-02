@@ -1,5 +1,18 @@
 # CaribeFiscal · SDK & Integración e-CF (DGII)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+![OpenAPI 3.0](https://img.shields.io/badge/OpenAPI-3.0-6BA539?logo=openapiinitiative&logoColor=white)
+![DGII e-CF](https://img.shields.io/badge/DGII-e--CF-0aa06e)
+![SDKs](https://img.shields.io/badge/SDKs-7-success)
+&nbsp;
+![PHP](https://img.shields.io/badge/PHP-777BB4?logo=php&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-339933?logo=nodedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
+![Java](https://img.shields.io/badge/Java-007396?logo=openjdk&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-512BD4?logo=dotnet&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)
+
 SDKs oficiales y documentación para integrar tu sistema con la API de
 **Comprobantes Fiscales Electrónicos (e-CF)** de la DGII de República Dominicana.
 
@@ -346,3 +359,6 @@ Gubernamental · `46` Exportaciones · `47` Pagos al Exterior.
 
 ## Soporte
 📧 ecf@omegaerp.do · Documentación interactiva en `/docs.html` de tu instancia.
+
+## Licencia
+[MIT](./LICENSE) © 2026 CaribeFiscal
